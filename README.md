@@ -3,16 +3,25 @@
 [![PyPI](https://img.shields.io/pypi/v/chorale.svg)](https://pypi.org/project/chorale/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Run N AI agents that brainstorm with you on a single text file, safely.**
+> **Run N AI agents that brainstorm with you on a single text file, safely. Mix and match Claude, Gemini, Codex, Ollama, and your own.**
 
 You write under `## user`. Each AI agent owns its own `## agent:<role>` section and edits it in place to reply. The file *is* the conversation — no chat windows, no scrolling transcripts, no lost edits. Concurrent saves are reconciled by [cotype](https://github.com/yurug/cotype)'s 3-way merge; the harness splices each agent's reply into ONLY its own section's bytes, so two agents editing two different sections **cannot conflict by construction**.
 
 ```bash
 pip install chorale
+
+# all-claude (default)
 chorale brainstorm.md cook logistics ux-designer note-taker
+
+# mix four different brains in one chorale
+chorale brainstorm.md \
+    cook \
+    logistics@gemini \
+    ux-designer@codex:gpt-5 \
+    note-taker@ollama:llama3
 ```
 
-…and you have four Claude personas waiting on your `## user` prompt. Edit `brainstorm.md` in any editor (with [`cotype-mode`](https://github.com/yurug/cotype/tree/main/editors/emacs) for live updates in Emacs); agents see your saves on their next poll and respond.
+Edit `brainstorm.md` in any editor (with [`cotype-mode`](https://github.com/yurug/cotype/tree/main/editors/emacs) for live updates in Emacs); agents see your saves on their next poll and respond.
 
 ## Why this exists
 
@@ -26,26 +35,81 @@ The tool was extracted from `cotype`'s [`examples/headless-agents.sh`](https://g
 pip install chorale
 ```
 
-Requires Python ≥ 3.11, [`cotype`](https://pypi.org/project/cotype/) (auto-installed), and the `claude` CLI on PATH.
+Requires Python ≥ 3.11, [`cotype`](https://pypi.org/project/cotype/) (auto-installed), and at least one supported AI CLI on PATH (`claude`, `gemini`, `codex`, `ollama`, or your own — see *Backends* below).
 
 ## Usage
 
 ```bash
-chorale FILE ROLE [ROLE ...] [OPTIONS]
+chorale FILE ROLE_SPEC [ROLE_SPEC ...] [OPTIONS]
 ```
 
+A **role spec** is one of:
+
+| Form | Meaning |
+|---|---|
+| `cook` | default backend, default model |
+| `cook@gemini` | gemini, gemini's default model |
+| `cook@gemini:gemini-2.5-pro` | gemini, specific model |
+| `cook@my-local` | a backend you defined in the config file |
+
+Examples:
+
 ```bash
-# four agents on a fresh brainstorm
+# four claude agents on a fresh brainstorm
 chorale brainstorm.md cook logistics ux-designer note-taker
 
+# mix brains: each role uses a different CLI
+chorale brainstorm.md \
+    cook \
+    logistics@gemini \
+    ux-designer@codex:gpt-5 \
+    note-taker@ollama
+
+# override the default backend for the whole run
+chorale notes.md reviewer linter --default-backend gemini
+
 # tighter polling, faster turns
-chorale notes.md reviewer linter --interval 0.5 --stagger 2 --model claude-haiku-4-5-20251001
+chorale notes.md reviewer linter --interval 0.5 --stagger 2
 
 # custom prompt template
 chorale notes.md author editor --prompt-file my-prompt.txt
 ```
 
-`chorale --help` prints the full surface, the protocol, and a copy-paste example.
+`chorale --help` prints the full surface, the role-spec syntax, the config-file format, and a copy-paste example.
+
+### Backends
+
+| Backend | Invocation | Default model |
+|---|---|---|
+| `claude` | `claude --print -p PROMPT --model MODEL` | `claude-sonnet-4-6` |
+| `gemini` | `gemini -p PROMPT --model MODEL` | (gemini CLI's own default) |
+| `codex` | `codex exec PROMPT --model MODEL` | (codex CLI's own default) |
+| `ollama` | `ollama run MODEL` (prompt via stdin) | `llama3` |
+
+You only need the binaries you actually use on PATH — a pure-`claude` run does not need `ollama` installed and vice versa.
+
+### Config file
+
+Optional. Default location: `~/.config/chorale/config.toml` (override with `--config PATH`).
+
+```toml
+[defaults]
+backend = "claude"
+model   = "claude-sonnet-4-6"
+
+# Override a built-in's default model:
+[backends.gemini]
+default_model = "gemini-2.5-pro"
+
+# Define a fully custom backend (e.g. a local model server, a research CLI):
+[backends.my-local]
+command       = ["my-tool", "--prompt={prompt}", "--model={model}"]
+prompt_via    = "argv"        # or "stdin" to pipe the prompt instead
+default_model = "v1"
+timeout       = 90.0
+```
+
+A custom backend can then be referenced as `role@my-local` in any role spec.
 
 ### Custom prompts
 

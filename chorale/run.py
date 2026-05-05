@@ -1,10 +1,14 @@
 """The agent runtime: cotype subprocess wrappers, per-agent loop, runner.
 
-One thread per agent role. Each thread runs an independent open ->
-claude -> splice -> save loop. The structural splice (in chorale.splice)
-guarantees that two agents editing two different sections produce edits
-in disjoint regions of the byte stream, so cotype's 3-way merge cannot
-conflict between them.
+One thread per agent. Each thread runs an independent open ->
+backend.call -> splice -> cotype save loop. The structural splice
+(in chorale.splice) guarantees that two agents editing two different
+sections produce edits in disjoint regions of the byte stream, so
+cotype's 3-way merge cannot conflict between them.
+
+Each agent has its own `Backend` (claude / gemini / codex / ollama /
+custom) and optionally a model override -- so different roles in the
+same chorale can use different brains.
 """
 from __future__ import annotations
 
@@ -12,17 +16,27 @@ import json
 import shutil
 import subprocess
 import threading
-import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from chorale.backends import Backend
 from chorale.prompt import render_prompt
 from chorale.splice import splice_section
 from chorale.template import render_template
 
 
-# A simple logger callable: log(role_or_None, message_str).
+# A simple logger: log(role_or_None, message_str).
 LogFn = Callable[[Optional[str], str], None]
+
+
+@dataclass
+class AgentConfig:
+    """One agent's resolved configuration."""
+
+    role: str
+    backend: Backend
+    model: Optional[str]
 
 
 # -- cotype subprocess helpers -------------------------------------------
@@ -70,34 +84,23 @@ def cotype_save(
         return None
 
 
-def claude_complete(
-    prompt: str, model: Optional[str], timeout: float = 60.0
-) -> Optional[bytes]:
-    """Call `claude --print -p PROMPT [--model MODEL]`. Bytes, or None on fail."""
-    cmd = ["claude", "--print", "-p", prompt]
-    if model:
-        cmd += ["--model", model]
-    try:
-        r = subprocess.run(cmd, capture_output=True, check=False, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return None
-    return r.stdout if r.returncode == 0 else None
-
-
 # -- agent loop ----------------------------------------------------------
 
 def _agent_loop(
-    role: str,
+    agent: AgentConfig,
     idx: int,
     file: str,
     interval: float,
     stagger: float,
-    model: Optional[str],
     prompt_template: str,
     stop: threading.Event,
     log: LogFn,
 ) -> None:
-    """One role's polling loop, cooperatively cancellable via `stop`."""
+    """One agent's polling loop, cooperatively cancellable via `stop`."""
+    role = agent.role
+    backend = agent.backend
+    model = agent.model
+
     # Stagger startup so agent N typically sees agent N-1's reply on its
     # first open, producing a chained conversation rather than parallel
     # monologues at the same base.
@@ -126,7 +129,6 @@ def _agent_loop(
                 return
             continue
 
-        # Don't re-poll Claude for a base we already processed.
         if base_sha == last_sha:
             if stop.wait(interval):
                 return
@@ -142,9 +144,9 @@ def _agent_loop(
             continue
 
         prompt = render_prompt(prompt_template, role, file_content)
-        agent_output = claude_complete(prompt, model)
+        agent_output = backend.call(prompt, model)
         if agent_output is None:
-            log(role, "claude failed or timed out")
+            log(role, f"{backend.name} failed or timed out")
             if stop.wait(interval):
                 return
             continue
@@ -184,25 +186,39 @@ def _agent_loop(
 
 # -- runner --------------------------------------------------------------
 
-class _Args:
+@dataclass
+class RunArgs:
     """Tiny config container; cli.py builds one of these."""
+
     interval: float
     stagger: float
-    model: Optional[str]
     prompt_template: str
 
 
-def check_dependencies() -> Optional[str]:
-    """Return None if `cotype` and `claude` are on PATH, else an error string."""
-    for tool in ("cotype", "claude"):
-        if shutil.which(tool) is None:
-            return f"{tool} not on PATH"
+def check_dependencies(agents: List[AgentConfig]) -> Optional[str]:
+    """Return None if `cotype` plus every agent's backend binary is on
+    PATH, else an error string with the missing tool's name."""
+    if shutil.which("cotype") is None:
+        return "cotype not on PATH (try: pip install cotype)"
+    seen = set()
+    for a in agents:
+        b = a.backend.binary
+        if b in seen:
+            continue
+        seen.add(b)
+        if shutil.which(b) is None:
+            return (
+                f"{b} not on PATH (required for backend {a.backend.name!r}, "
+                f"used by role {a.role!r})"
+            )
     return None
 
 
-def run(file: Path, roles: List[str], args: _Args, log: LogFn) -> int:
-    """Pre-allocate the template if needed, init cotype, spawn one thread
-    per role, and block on KeyboardInterrupt. Returns process exit code."""
+def run(file: Path, agents: List[AgentConfig], args: RunArgs, log: LogFn) -> int:
+    """Pre-allocate the template if needed, init cotype, spawn one
+    thread per agent, and block on KeyboardInterrupt. Returns an exit
+    code."""
+    roles = [a.role for a in agents]
     if not file.exists() or file.stat().st_size == 0:
         file.write_bytes(render_template(roles))
         log(None, f"pre-allocated {file} with {len(roles)} agent sections")
@@ -210,32 +226,39 @@ def run(file: Path, roles: List[str], args: _Args, log: LogFn) -> int:
     # cotype init is idempotent.
     _run("cotype", "init", str(file), "--json")
 
-    # Refuse to start on an existing pending conflict; otherwise every
-    # agent burns Claude calls on saves that can never succeed.
+    # Refuse to start on an existing pending conflict.
     if cotype_status(str(file)) == "conflicted":
         log(None,
             f"pending conflict on {file}; resolve it first with "
             f"`cotype resolve {file}` (after editing out markers).")
         return 5
 
+    # Summary line so the user sees who's using what brain.
+    fleet = ", ".join(
+        f"{a.role}@{a.backend.name}"
+        + (f":{a.model}" if a.model else "")
+        for a in agents
+    )
+    log(None,
+        f"{len(agents)} agents on {file} -- {fleet}. Ctrl-C to stop.")
+
     stop = threading.Event()
     threads = [
         threading.Thread(
             target=_agent_loop,
             args=(
-                role, idx, str(file),
-                args.interval, args.stagger, args.model,
+                agent, idx, str(file),
+                args.interval, args.stagger,
                 args.prompt_template, stop, log,
             ),
             daemon=True,
-            name=f"chorale:{role}",
+            name=f"chorale:{agent.role}",
         )
-        for idx, role in enumerate(roles)
+        for idx, agent in enumerate(agents)
     ]
     for t in threads:
         t.start()
 
-    log(None, f"{len(roles)} agents on {file} (model={args.model or 'cli-default'}). Ctrl-C to stop.")
     try:
         while any(t.is_alive() for t in threads):
             for t in threads:
