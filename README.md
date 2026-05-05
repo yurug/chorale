@@ -7,6 +7,10 @@
 
 You write under `## user`. Each AI agent owns its own `## agent:<role>` section and edits it in place to reply. The file *is* the conversation — no chat windows, no scrolling transcripts, no lost edits. Concurrent saves are reconciled by [cotype](https://github.com/yurug/cotype)'s 3-way merge; the harness splices each agent's reply into ONLY its own section's bytes, so two agents editing two different sections **cannot conflict by construction**.
 
+![chorale demo: three Claude personas + a note-taker brainstorming with a user in one shared file](https://raw.githubusercontent.com/yurug/cotype/main/examples/demo-crepe/demo.gif)
+
+*Three Claude personas (cook, logistics, ux-designer) plus a note-taker design a school crêpe stand with the user — all in one `brainstorm.md`. Same demo applies to the multi-backend mode below; mix in `gemini`, `codex`, or `ollama` per role.*
+
 ```bash
 pip install chorale
 
