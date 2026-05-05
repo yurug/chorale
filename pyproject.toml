@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chorale"
+version = "0.1.0"
+description = "Run N AI agents that collaborate with you on a single text file, safely. Powered by cotype."
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Yann Régis-Gianas", email = "yann@regis-gianas.org"}]
+readme = "README.md"
+keywords = ["ai", "agents", "claude", "llm", "concurrent", "shared-file", "cotype", "brainstorm", "collaboration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+
+# Runtime dependencies.
+# - cotype: the safe-save CLI we drive (every actor calls open / save).
+# Note: we also rely on `claude` (Claude Code CLI) being on PATH, but
+# that's not a Python package, so we do not list it here -- the CLI
+# checks for it at startup and exits with a clear message if absent.
+dependencies = [
+    "cotype>=0.2.2",
+]
+
+[project.urls]
+Homepage      = "https://github.com/yurug/chorale"
+Repository    = "https://github.com/yurug/chorale"
+Issues        = "https://github.com/yurug/chorale/issues"
+Changelog     = "https://github.com/yurug/chorale/blob/main/CHANGELOG.md"
+
+[project.scripts]
+chorale = "chorale.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["chorale*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
