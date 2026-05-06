@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-06
+
+CLI-only patch release; documentation-only.
+
+- **Literate-programming pass over `chorale/`.** No behavioural change,
+  no API change. Module-level docstrings, function docstrings, and
+  inline comments rewritten so the source itself is now a pedagogical
+  introduction to chorale's design: the section-aware splice as the
+  conflict-killer, the per-role placeholder anchors that diff3 needs,
+  the why-CLI-not-SDK choice, the role-spec resolution rules, the
+  threaded agent runtime, and the layered error handling in the
+  dispatcher are all explained in-source. Reading the package now
+  teaches the model.
+
 ## [0.2.0] — 2026-05-05
 
 Multi-backend support. Different roles in the same chorale can now use
@@ -43,7 +57,8 @@ ollama; custom backends via a TOML config file.
 - The `--model` flag is renamed to `--default-model` (with `--model`
   kept as an alias for backwards compatibility with 0.1.0 invocations).
 
-[Unreleased]: https://github.com/yurug/chorale/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yurug/chorale/compare/v0.2.1...HEAD
+[0.2.1]:      https://github.com/yurug/chorale/releases/tag/v0.2.1
 [0.2.0]:      https://github.com/yurug/chorale/releases/tag/v0.2.0
 [0.1.0]:      https://github.com/yurug/chorale/releases/tag/v0.1.0
 

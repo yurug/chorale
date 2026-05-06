@@ -1,4 +1,51 @@
-"""argparse + dispatch for the `chorale` console script."""
+"""argparse + dispatch for the `chorale' console script -- the user's entry point.
+
+Where this module sits
+======================
+
+`chorale' the binary calls into `cli.main(argv)'. This module's job is
+the smallest possible "thick parser, thin main" wiring:
+
+  parser = build_parser()              # all the help text + arg shapes
+  raw    = parser.parse_args(argv)     # the user's choices, parsed
+  cfg    = load_config(raw.config)     # TOML config, if any
+  agents = _build_agents(...)          # role-specs -> (Backend, model) tuples
+  err    = check_dependencies(agents)  # all needed CLIs on PATH?
+  return run(file, agents, args, log)  # hand off to the runtime
+
+Everything substantive lives in `run.py' / `backends.py' / `splice.py'
+/ etc.; this file is responsible for parsing user input and routing
+errors to the right exit code.
+
+The help text IS the user manual
+================================
+
+The two big strings at the top (`_DESCRIPTION', `_EPILOG') are what
+users see when they type `chorale --help'. They include:
+
+  - The role-spec syntax (`role', `role@backend', `role@backend:model')
+    with examples.
+  - A copy-pasteable invocation that mixes four backends in one
+    chorale.
+  - The TOML config schema, inline.
+  - Dependencies (`cotype' + at least one of claude/gemini/codex/ollama).
+
+This is deliberate: a tool is much more pleasant to use when its
+primary documentation is a couple of `--help' away rather than on a
+website. It also makes chorale agent-discoverable -- an LLM that runs
+`chorale --help' once knows enough to invoke the tool.
+
+Exit codes
+==========
+
+  0 -- normal termination (Ctrl-C or all threads exited).
+  2 -- usage error: bad config, unknown backend, missing CLI on PATH,
+       unreadable prompt file. Anything that fails BEFORE the
+       runtime is reached.
+  5 -- a pending conflict was already on the file at startup.
+       Returned by `run.run()'.
+  Other -- unhandled exceptions propagate as Python tracebacks.
+"""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +69,8 @@ from chorale.prompt import DEFAULT_PROMPT
 from chorale.run import AgentConfig, RunArgs, check_dependencies, run
 
 
+# Top-of-help description. Has the elevator pitch and the key
+# differentiator (multi-backend, splice-by-construction-no-conflicts).
 _DESCRIPTION = """\
 Run N AI agents that collaborate with you on a single text file, safely.
 
@@ -37,6 +86,10 @@ backends: claude (default), gemini, codex, ollama. Custom backends
 are defined in ~/.config/chorale/config.toml.
 """
 
+
+# Bottom-of-help epilog. Worked examples + config schema + deps.
+# The role-spec syntax is repeated here in tabular form because the
+# 30-second user wants the syntax visible without reading the prose.
 _EPILOG = """\
 ROLE SPEC SYNTAX:
 
@@ -76,6 +129,28 @@ More: https://github.com/yurug/chorale
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Construct the argparse parser for chorale.
+
+    The flag surface is intentionally small:
+
+      file               positional: path to the shared file.
+      ROLE_SPEC...       positional, 1+: the agents to spawn.
+      --config           override the default config-file location.
+      --default-backend  override config's `defaults.backend'.
+      --default-model    override config's `defaults.model'.
+      --interval         tune polling cadence per agent (default 1s).
+      --stagger          tune startup phase between agents (default 3s).
+      --prompt-file      override the built-in brainstorm prompt.
+
+    `--model' is registered as an alias for `--default-model' so
+    chorale 0.1.0 invocations (which only had `--model') still work
+    in 0.2.0+. argparse's "two flag names, one dest" pattern handles
+    this without extra code.
+
+    `RawDescriptionHelpFormatter' preserves our manually-formatted
+    `_DESCRIPTION' / `_EPILOG' (line breaks, indentation) instead of
+    re-wrapping them.
+    """
     p = argparse.ArgumentParser(
         prog="chorale",
         description=_DESCRIPTION,
@@ -102,8 +177,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="config file (default: ~/.config/chorale/config.toml if present)",
     )
-    # `--model` is kept as a deprecated alias for `--default-model` so
-    # 0.1.0 invocations keep working.
+    # Two flag names, one `dest' -- both `--default-model' and
+    # `--model' (the 0.1.0 name) write into `args.default_model'.
     p.add_argument(
         "--default-model", "--model",
         dest="default_model",
@@ -147,12 +222,33 @@ def _build_agents(
     cli_default_backend: Optional[str],
     cli_default_model: Optional[str],
 ) -> List[AgentConfig]:
-    """Resolve every role spec into an AgentConfig.
+    """Resolve every role spec into an `AgentConfig'.
 
-    Default backend is the first non-None of:
-      --default-backend, config defaults.backend, "claude".
-    Default model (for role-without-@) is the first non-None of:
-      --default-model, config defaults.model.
+    Default-backend resolution (in priority order):
+      1. `--default-backend' on the CLI.
+      2. `defaults.backend' in the config file.
+      3. The hard-coded fallback `"claude"`.
+
+    If the resolved default isn't in the registry (e.g., a config
+    file pointing at a custom backend that wasn't actually defined),
+    we ValueError with the list of known backends -- typically
+    user error.
+
+    Default-model resolution:
+      1. `--default-model' on the CLI.
+      2. `defaults.model' in the config file.
+      3. None (the chosen Backend's `default_model' will be used).
+
+    The default-model is passed through to `resolve_backend' for each
+    role; that function applies further rules per-spec (in
+    particular, `--default-model' only applies when the role spec
+    didn't pick a different `@backend' -- see `resolve_backend' for
+    the full priority).
+
+    Each role spec is parsed individually; one bad spec doesn't
+    prevent the rest from being parsed (well, the first bad one
+    raises and the loop stops; we don't try to be clever about
+    accumulating multiple errors -- the user fixes one and re-runs).
     """
     registry = build_registry(cfg)
 
@@ -162,7 +258,11 @@ def _build_agents(
             f"unknown default backend {default_backend!r}; "
             f"known: {sorted(registry)}"
         )
-    default_model = cli_default_model if cli_default_model is not None else cfg.default_model
+    default_model = (
+        cli_default_model
+        if cli_default_model is not None
+        else cfg.default_model
+    )
 
     agents: List[AgentConfig] = []
     for spec_str in role_specs:
@@ -170,21 +270,41 @@ def _build_agents(
         backend, model = resolve_backend(
             spec, registry, default_backend, default_model
         )
-        agents.append(AgentConfig(role=spec.role, backend=backend, model=model))
+        agents.append(
+            AgentConfig(role=spec.role, backend=backend, model=model)
+        )
     return agents
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Parse argv, resolve config + agents, hand off to `run.run()'.
+
+    Layered error handling: each phase has a "fail fast with a clean
+    error message" path that returns a non-zero exit code WITHOUT
+    a Python traceback. Going down the layers:
+
+      1. argparse -- handles its own --help / --version / bad-flag
+         errors. Doesn't reach this function's body.
+      2. config load -- `ConfigError' on bad TOML.
+      3. agent build -- `ValueError' / `ConfigError' on bad role
+         specs or misconfigured backends.
+      4. dependency check -- error string if a needed CLI is missing.
+      5. prompt file load -- `OSError' if --prompt-file is unreadable.
+      6. run -- the runtime; returns 0 on Ctrl-C, 5 on pending conflict.
+
+    Anything we DON'T catch propagates as a traceback (which is the
+    right behaviour for genuine bugs).
+    """
     raw = build_parser().parse_args(argv)
 
-    # Load config (file may not exist; that's fine).
+    # Phase 2: config.
     try:
         cfg = load_config(raw.config)
     except ConfigError as e:
         print(f"chorale: config error: {e}", file=sys.stderr)
         return 2
 
-    # Resolve every role spec to an agent + backend.
+    # Phase 3: agent resolution.
     try:
         agents = _build_agents(
             raw.roles, cfg, raw.default_backend, raw.default_model
@@ -193,12 +313,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"chorale: {e}", file=sys.stderr)
         return 2
 
-    # Tool dependency check.
+    # Phase 4: dependency check. We do this AFTER agent resolution
+    # because the dependency set depends on which backends each role
+    # uses -- a pure-claude run doesn't need ollama on PATH.
     err = check_dependencies(agents)
     if err:
         print(f"chorale: {err}", file=sys.stderr)
         return 2
 
+    # Phase 5: prompt file (optional).
     if raw.prompt_file is not None:
         try:
             prompt_template = raw.prompt_file.read_text(encoding="utf-8")
@@ -214,6 +337,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prompt_template=prompt_template,
     )
 
+    # The logger is a closure so the runtime doesn't have to know
+    # about formatting decisions. `[role]' or `[chorale]' as a
+    # column-width-padded prefix; one line per event.
     def log(role: Optional[str], msg: str) -> None:
         prefix = f"[{role}]" if role else "[chorale]"
         print(f"{prefix:<28} {msg}", flush=True)
